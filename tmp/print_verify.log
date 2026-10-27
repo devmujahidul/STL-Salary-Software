@@ -1,0 +1,17 @@
+[1] launching Excel
+[2] opening workbook
+[3] workbook open; checking margins
+    LO_PO: bottom=54.0pt footer=25.2pt
+    FIXED: bottom=54.0pt footer=25.2pt
+    PRODUCTION: bottom=54.0pt footer=25.2pt
+[4] Designation must be hidden in the file itself (macro-independent)
+[5] running HideDesignationForPrint
+    after hide: {'LO_PO': True, 'FIXED': True, 'PRODUCTION': True}, Lists hidden=False
+[6] restoring: default file state is hidden, so it stays hidden
+    after restore: {'LO_PO': True, 'FIXED': True, 'PRODUCTION': True}
+[6b] user un-hides FIXED; hide+restore must bring it back visible
+    after re-hide: {'LO_PO': True, 'FIXED': True, 'PRODUCTION': True}
+    after restore: {'LO_PO': True, 'FIXED': False, 'PRODUCTION': True}
+[7] closing
+PRINT-LAYOUT CHECKS PASSED
+exit=0

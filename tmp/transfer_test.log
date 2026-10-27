@@ -1,0 +1,34 @@
+[OK ] DutyTransferHelpers module present
+[OK ] frmDutyTransfer present
+[OK ] form code behind has button handlers
+layout: 31 date columns, filter col 46, P col 36
+[OK ] found a weekday test case
+[OK ] found a weekend test case
+    engine said: '1 worker(s) moved from day 27 to day 26 (1 weekday, 0 weekend).\r\n10 worker(s) skipped: target date is not A.'
+[OK ] [weekday] result counts match scan - engine=(1, 10) expected=(1,10)
+[OK ] [weekday] target got duty P/OT/EOT
+[OK ] [weekday] source becomes A/0/0
+[OK ] [weekday] monthly P/A totals correct - P 25.0->25.0, A 1.0->1.0
+[OK ] [weekday] other workers untouched
+    undo said: 'Last transfer undone: 6 cell(s) restored.'
+[OK ] [weekday] undo restored all six cells
+[OK ] [weekday] HasUndo false after undo
+    engine said: '1 worker(s) moved from day 28 to day 26 (0 weekday, 1 weekend).\r\n10 worker(s) skipped: target date is not A.'
+[OK ] [weekend] result counts match scan - engine=(1, 10) expected=(1,10)
+[OK ] [weekend] target code P
+[OK ] [weekend] target OT math - got 2.0 want 2
+[OK ] [weekend] target EOT math - got 3.5 want 3.5
+[OK ] [weekend] source keeps W
+[OK ] [weekend] source zeroed
+[OK ] [weekend] monthly P/A totals correct - P 25.0->26.0, A 1.0->0.0
+[OK ] [weekend] other workers untouched
+    undo said: 'Last transfer undone: 6 cell(s) restored.'
+[OK ] [weekend] undo restored all six cells
+[OK ] [weekend] HasUndo false after undo
+[OK ] form initialised with combo data - sections=38,dates=31,undo=False
+[OK ] section combo filled (38 entries)
+[OK ] date combos filled (31 days)
+[OK ] undo button disabled on fresh file (False)
+[OK ] no _TransferLog in saved layout
+ALL TRANSFER CHECKS PASSED
+exit=0
