@@ -28,6 +28,7 @@ pip install xlsxwriter openpyxl pandas pythoncom pywin32 beautifulsoup4 lxml
 ```
 .
 ├── convert_attendance.py    # Main script
+├── run.bat                  # Double-click launcher (Windows)
 ├── raw_files/               # Place raw jobcard HTML files here
 ├── attendance_export/       # Internal package (do not modify)
 │   ├── __init__.py
@@ -37,11 +38,28 @@ pip install xlsxwriter openpyxl pandas pythoncom pywin32 beautifulsoup4 lxml
 │   ├── vba.py
 │   └── writer.py
 ├── output/                  # Generated output files
+├── nevertouch/              # Company logo (embedded at build time)
 ├── Format.xls               # Reference format file
 └── requirements.txt         # Python dependencies
 ```
 
 ## Running the Program
+
+### One-Click Run (Windows)
+
+Double-click **`run.bat`** in the project folder. It:
+
+- always runs from the project folder (works even with "Run as administrator")
+- finds Python automatically (`python`, falling back to `py`)
+- runs the full conversion and prints the result summary in the console
+- lists the newest files in `output/` and stays open ("Press any key") so
+  nothing is missed
+
+Command-line options pass through, e.g. `run.bat --skip-macros`.
+
+> Tip: close any `Salary_Attendance_*.xlsm` you have open in Excel before
+> running — Excel locks the file and the macro step can't overwrite it while
+> it is open (the .xlsx is still regenerated).
 
 ### Basic Usage (with VBA macros)
 ```bash
@@ -131,6 +149,20 @@ The form lets you:
 - Footer signatures appear at the bottom of each printed page
 - Table fits to pages horizontally, continues as needed vertically
 
+### Company logo watermark
+
+The company logo (`nevertouch/nevertouch.png`) is printed on every page at the
+top-right of the header band. The company/address/period rows keep their
+original compact heights; the logo spans them plus the empty right side of
+the Sub Section row, so the info text spacing and the number of data rows per
+page stay close to the original layout. The logo is embedded at a fixed
+standard size (128×128 px) inside the print area, so it never overflows or
+underflows and scales with the sheet's fit-to-width print scaling.
+
+The logo is embedded into the workbook package itself — it is **not linked** to
+`nevertouch.png`. Once a `.xlsx`/`.xlsm` is generated, the logo remains in the
+file even if `nevertouch.png` is deleted or replaced later.
+
 ### Footer Signatures
 - Three default signatures: "Prepared by", "Checked by", "Approved by"
 - Names can be edited on the "Lists" sheet in Excel
@@ -162,7 +194,7 @@ The form lets you:
 |-------|----------|
 | "No raw files found" | Ensure files are in `raw_files/` directory |
 | "Could not read date columns" | Check HTML files contain proper jobcard tables with "SL" row |
-| "Macros were not added" | Excel VBA project access is disabled - `.xlsx` still works with AutoFilter |
+| "Macros were not added" | Read the printed **Reason** line - it names the exact fix: install `pywin32`, enable *"Trust access to the VBA project object model"* in Excel's Trust Center, or start/repair Excel. The `.xlsx` still works with AutoFilter. |
 | VBA compilation errors | Enable "Trust access to the VBA project object model" in Excel |
 | Duty transfer form won't open | Ensure the .xlsm file is saved, not just .xlsx |
 | Footer signatures not appearing | Edit names on the "Lists" sheet and reopen the file |

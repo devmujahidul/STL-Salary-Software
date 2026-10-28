@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import xlsxwriter
@@ -20,6 +21,11 @@ from .constants import (
     SUBSECTION_PREFIX,
     SUMMARY_HEADERS,
     SUMMARY_KEYS,
+    LOGO_HEIGHT_PX,
+    LOGO_PATH,
+    LOGO_RIGHT_PAD_PX,
+    LOGO_SECTION_ROW_HEIGHT_PT,
+    LOGO_WIDTH_PX,
 )
 from .parser import AttendanceData, Worker
 
@@ -27,6 +33,12 @@ HELPER_NAME_COL = 46  # AU, hidden
 HELPER_FLAG_COL = 47  # AV, hidden
 LIST_COL = 48  # AW, hidden
 LABEL_TEXT_COL = 49  # AX, hidden
+
+# Widths (Excel character units) of the summary columns right of the date
+# columns, in order: P A OT EOT TOT CL SL EL H Signature. _set_widths()
+# applies them and the company-logo anchor walks them Signature-first to keep
+# the logo inside the print area.
+SUMMARY_COL_WIDTHS = (2.9, 2.9, 3.1, 4.6, 4.6, 2.9, 2.9, 2.9, 2.9, 8.0)
 
 
 def write_workbook(data: AttendanceData, output_path: str | Path) -> Path:
@@ -267,6 +279,75 @@ def _formats(workbook: xlsxwriter.Workbook) -> dict:
     }
 
 
+def _row_pixels(height_pt: float) -> int:
+    """Row points -> pixels, matching xlsxwriter's own _size_row conversion."""
+    return int(4.0 / 3.0 * height_pt)
+
+
+def _col_pixels(width: float) -> int:
+    """Excel character units -> pixels (Calibri 11), matching xlsxwriter's
+    own _size_col conversion: pixels = int(width * 7 + 0.5) + 5."""
+    return int(width * 7 + 0.5) + 5
+
+
+def _logo_anchor(signature_col: int, logo_w_px: int) -> tuple[int, int]:
+    """Return (anchor_col, x_offset) so the logo's right edge stays inside the
+    print area, LOGO_RIGHT_PAD_PX before the Signature column's right edge.
+
+    A large logo is wider than the Signature column alone, so the anchor walks
+    left over the summary columns (SUMMARY_COL_WIDTHS, Signature first) until
+    the span is wide enough. The resulting offset is always smaller than the
+    anchor column's own width, so xlsxwriter keeps the anchor cell as chosen.
+    """
+    need = logo_w_px + LOGO_RIGHT_PAD_PX
+    span_px = 0
+    steps_left = 0
+    while True:
+        idx = len(SUMMARY_COL_WIDTHS) - 1 - steps_left
+        if idx < 0:
+            break  # wider than all summary columns; anchor at the first one
+        span_px += _col_pixels(SUMMARY_COL_WIDTHS[idx])
+        if span_px >= need:
+            break
+        steps_left += 1
+    return signature_col - steps_left, max(span_px - need, 0)
+
+
+def _logo_scale_factors(logo_path: Path, target_w_px: int, target_h_px: int):
+    """Return (x_scale, y_scale) so xlsxwriter renders the logo at exactly the
+    target pixel size.
+
+    xlsxwriter sizes an image from its embedded pixel density:
+        rendered_px = source_px * (96 / source_dpi) * scale
+    (workbook._process_png falls back to 96 dpi when the PNG has none). We
+    replicate that here so a PNG stored at any DPI still prints at the same
+    standard size, while the full-resolution PNG stays embedded in the file.
+    """
+    data = logo_path.read_bytes()
+    if len(data) < 24 or data[:8] != b"\x89PNG\r\n\x1a\n":
+        return 1.0, 1.0
+
+    src_w, src_h = struct.unpack(">II", data[16:24])
+
+    # Locate the pHys chunk (physical pixel density, pixels per metre).
+    x_density = y_density = 0
+    pos = 8
+    while pos + 12 <= len(data):
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
+        chunk_type = data[pos + 4 : pos + 8]
+        if chunk_type == b"pHYs" and pos + 20 <= len(data):
+            x_density, y_density = struct.unpack(">II", data[pos + 8 : pos + 16])
+            break
+        pos += 12 + length  # length + type + data + CRC
+
+    x_dpi = x_density * 0.0254 if x_density else 96.0
+    y_dpi = y_density * 0.0254 if y_density else 96.0
+
+    base_w = src_w * 96.0 / x_dpi
+    base_h = src_h * 96.0 / y_dpi
+    return target_w_px / base_w, target_h_px / base_h
+
+
 def _write_sheet(
     ws,
     workbook,
@@ -300,6 +381,50 @@ def _write_sheet(
     ws.merge_range(0, 0, 0, signature_col, data.company, formats["company"])
     ws.merge_range(1, 0, 1, signature_col, data.address, formats["address"])
     ws.merge_range(2, 0, 2, signature_col, data.period_label, formats["period"])
+
+    # Company logo on the top-right of the header band. It spans the company /
+    # address / period rows plus the Sub Section row on the right side, where
+    # nothing is written, so the info rows keep their original compact
+    # heights. Its right edge stays LOGO_RIGHT_PAD_PX inside the print area
+    # (Signature column) so it prints on every page - title rows 1-5 repeat
+    # on every printed page. The image is embedded in the workbook package,
+    # not linked, so it remains even if the source PNG is deleted later.
+    if LOGO_PATH.exists():
+        logo_x_scale, logo_y_scale = _logo_scale_factors(
+            LOGO_PATH, LOGO_WIDTH_PX, LOGO_HEIGHT_PX
+        )
+        band_px = (
+            _row_pixels(24)
+            + _row_pixels(17)
+            + _row_pixels(17)
+            + _row_pixels(LOGO_SECTION_ROW_HEIGHT_PT)
+        )
+        if LOGO_HEIGHT_PX + 4 > band_px:
+            print(
+                f"Warning: logo ({LOGO_HEIGHT_PX}px) is taller than the "
+                f"header band ({band_px}px) - raise "
+                "LOGO_SECTION_ROW_HEIGHT_PT in constants.py."
+            )
+        logo_col, logo_x_offset = _logo_anchor(signature_col, LOGO_WIDTH_PX)
+        y_offset = max((band_px - LOGO_HEIGHT_PX) // 2, 0)
+        ws.insert_image(
+            0,
+            logo_col,
+            str(LOGO_PATH),
+            {
+                "x_scale": logo_x_scale,
+                "y_scale": logo_y_scale,
+                "positioning": 2,  # don't move or size with cells
+                "x_offset": logo_x_offset,
+                "y_offset": y_offset,
+                "description": "Company logo",
+            },
+        )
+    else:
+        print(
+            f"Warning: company logo not found at {LOGO_PATH}; "
+            "header logo was not embedded in this workbook."
+        )
 
     # The subsection label is deliberately not merged: a normal formula in A4
     # recalculates when the SubSection Filter column is filtered.
@@ -354,10 +479,13 @@ def _write_sheet(
     ws.freeze_panes(HEADER_ROWS, 0)
     ws.repeat_rows(0, PRINT_TITLE_LAST_ROW)
     ws.print_area(0, 0, last_data_row, signature_col)
+    # Rows 1-3 keep their original compact heights; the Sub Section row (4)
+    # carries the extra height the logo needs on the right side. All five
+    # repeat on every printed page.
     ws.set_row(0, 24)
     ws.set_row(1, 17)
     ws.set_row(2, 17)
-    ws.set_row(3, 19)
+    ws.set_row(3, LOGO_SECTION_ROW_HEIGHT_PT)
     ws.set_row(4, 32)
     for row in range(DATA_START_ROW, last_data_row + 1):
         # 15.1pt lets 43 attendance rows fit on an A4 landscape page after
@@ -515,16 +643,9 @@ def _set_widths(ws, date_count: int):
     ws.set_column(3, 3, 14, None, {"hidden": True})
     ws.set_column(date_start, date_end, 1.9)
 
-    # P A
-    ws.set_column(summary_start, summary_start + 1, 2.9)
-    # OT
-    ws.set_column(summary_start + 2, summary_start + 2, 3.1)
-    # EOT TOT
-    ws.set_column(summary_start + 3, summary_start + 4, 4.6)
-    # CL SL EL H
-    ws.set_column(summary_start + 5, summary_start + 8, 2.9)
-    # Signature
-    ws.set_column(summary_start + 9, summary_start + 9, 8)
+    # P A OT EOT TOT CL SL EL H Signature
+    for offset, width in enumerate(SUMMARY_COL_WIDTHS):
+        ws.set_column(summary_start + offset, summary_start + offset, width)
     # SubSection Filter - kept on screen for filtering, outside the print area
     ws.set_column(summary_start + 10, summary_start + 10, 15)
     # Hidden helper cells, dropdown list and label formula text

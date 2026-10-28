@@ -39,12 +39,15 @@ def main() -> None:
     print(f"Wrote {path}")
 
     if not args.skip_macros:
-        if attach_filter_macros(path):
+        ok, reason = attach_filter_macros(path)
+        if ok:
             print(f"Added filter macros: {path.with_suffix('.xlsm')}")
         else:
+            print("Macros were not added:")
+            print(f"  {reason}")
             print(
-                "Macros were not added (Excel VBA access is off or Excel is unavailable). "
-                "The .xlsx still filters from the SubSection Filter column; A4 shows the current selection."
+                "The .xlsx still filters from the SubSection Filter column; "
+                "A4 shows the current selection."
             )
 
 

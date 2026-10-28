@@ -46,3 +46,25 @@ FOOTER_LINE = "_" * 22
 # Distance of the footer text from the paper edge, in inches. Must stay small
 # against the reserved bottom margin (0.75") so it prints inside the strip.
 FOOTER_MARGIN = 0.35
+
+# ---------------------------------------------------------------------------
+# Company logo printed as a header watermark
+# ---------------------------------------------------------------------------
+# The logo lives in the repository (nevertouch/nevertouch.png) and is embedded
+# into every attendance sheet at build time. xlsxwriter stores the image inside
+# the .xlsx/.xlsm package itself - it is not linked to the source file - so
+# deleting nevertouch.png afterwards does not remove the logo from generated
+# workbooks.
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+LOGO_PATH = PROJECT_ROOT / "nevertouch" / "nevertouch.png"
+# Fixed "standard size" of the embedded logo, in pixels (source is 1240x1240).
+LOGO_WIDTH_PX = 128
+LOGO_HEIGHT_PX = 128
+# The company/address/period rows keep their original compact heights; the
+# Sub Section row (row 4) carries the extra height the logo needs, so the
+# printed title block only grows by ~1.5 data rows per page.
+LOGO_SECTION_ROW_HEIGHT_PT = 42
+# Gap kept between the logo's right edge and the print-area boundary.
+LOGO_RIGHT_PAD_PX = 4

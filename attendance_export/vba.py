@@ -705,28 +705,54 @@ def _build_transfer_form(project) -> bool:
     return True
 
 
-def attach_filter_macros(xlsx_path: str | Path) -> bool:
-    """Add dropdown-filter macros if Excel allows VBA project access."""
+def attach_filter_macros(xlsx_path: str | Path) -> tuple[bool, str]:
+    """Add dropdown-filter macros if Excel allows VBA project access.
+
+    Returns (success, reason). On success the reason is empty; otherwise it
+    names the exact blocker (missing pywin32, no Excel, VBA project access
+    disabled, file locked, ...) so the console can show a concrete fix.
+    """
     try:
         import pythoncom  # type: ignore
         import win32com.client  # type: ignore
     except ImportError:
-        return False
+        return False, (
+            "Python package 'pywin32' is not installed in this Python.\n"
+            "        Fix: run  python -m pip install pywin32"
+        )
 
     xlsx_path = Path(xlsx_path).resolve()
     pythoncom.CoInitialize()
     excel = None
     try:
-        excel = win32com.client.DispatchEx("Excel.Application")
+        try:
+            excel = win32com.client.DispatchEx("Excel.Application")
+        except Exception as exc:
+            return False, (
+                "Microsoft Excel could not be started (is it installed?):\n"
+                f"        {exc}".strip()
+            )
         excel.Visible = False
         excel.DisplayAlerts = False
         excel.AskToUpdateLinks = False
-        wb = excel.Workbooks.Open(str(xlsx_path))
+        try:
+            wb = excel.Workbooks.Open(str(xlsx_path))
+        except Exception as exc:
+            return False, (
+                f"Excel could not open the generated workbook:\n"
+                f"        {exc}".strip()
+            )
         try:
             project = wb.VBProject
         except Exception:
             wb.Close(SaveChanges=False)
-            return False
+            return False, (
+                "Excel is blocking programmatic access to macros.\n"
+                "        Fix in Excel: File > Options > Trust Center >\n"
+                "        Trust Center Settings... > Macro Settings >\n"
+                "        tick 'Trust access to the VBA project object model',\n"
+                "        then run this program again."
+            )
 
         _replace_thisworkbook(project, VBA_THISWORKBOOK)
         _replace_std_module(project, "FilterHelpers", VBA_MODULE)
@@ -734,11 +760,20 @@ def attach_filter_macros(xlsx_path: str | Path) -> bool:
         _build_transfer_form(project)
 
         xlsm_path = xlsx_path.with_suffix(".xlsm")
-        wb.SaveAs(str(xlsm_path), FileFormat=52)
+        try:
+            wb.SaveAs(str(xlsm_path), FileFormat=52)
+        except Exception as exc:
+            wb.Close(SaveChanges=False)
+            return False, (
+                f"Excel could not save {xlsm_path.name}:\n"
+                f"        {exc}".strip() + "\n"
+                "        (close the file if it is open in Excel, or check\n"
+                "        write permission on the output folder)"
+            )
         wb.Close(SaveChanges=False)
-        return True
-    except Exception:
-        return False
+        return True, ""
+    except Exception as exc:
+        return False, f"Unexpected Excel automation error: {exc}".strip()
     finally:
         if excel is not None:
             excel.Quit()
