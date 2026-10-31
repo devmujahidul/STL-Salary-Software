@@ -163,6 +163,30 @@ The logo is embedded into the workbook package itself — it is **not linked** t
 `nevertouch.png`. Once a `.xlsx`/`.xlsm` is generated, the logo remains in the
 file even if `nevertouch.png` is deleted or replaced later.
 
+### Protected sheets (the logo cannot be deleted)
+
+Every attendance sheet is protected with the password stored in
+`attendance_export/constants.py` (`SHEET_PROTECT_PASSWORD`). Protection means:
+
+- **The logo cannot be selected or deleted** — clicking it does nothing, and
+  Delete/Cut are refused ("shapes are locked for selection")
+- Attendance data and headers cannot be typed over; rows/columns cannot be
+  inserted or deleted
+- **Column widths and row heights can still be adjusted by dragging** the
+  edges (and columns/rows can be hidden or unhidden)
+- Sheets cannot be deleted, renamed or moved (workbook structure is protected
+  too, so the logo cannot be removed by deleting a sheet)
+- Everything else still works: the AutoFilter dropdowns, the A4
+  subsection picker (its cell is unlocked), viewing and copying, printing, and
+  all VBA features (automatic filtering, the duty-transfer form, footer
+  signatures, print-time Designation hiding)
+
+The macros re-apply the protection at every open with `UserInterfaceOnly`, so
+VBA keeps full access while mouse-and-keyboard users stay locked out. To
+change the password, edit `SHEET_PROTECT_PASSWORD` and rebuild. (Protection is
+a convenience guard for everyday use, not encryption — a determined expert
+could still bypass it, but a normal user cannot delete the logo.)
+
 ### Footer Signatures
 - Three default signatures: "Prepared by", "Checked by", "Approved by"
 - Names can be edited on the "Lists" sheet in Excel

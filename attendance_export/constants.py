@@ -68,3 +68,13 @@ LOGO_HEIGHT_PX = 128
 LOGO_SECTION_ROW_HEIGHT_PT = 42
 # Gap kept between the logo's right edge and the print-area boundary.
 LOGO_RIGHT_PAD_PX = 4
+# ---------------------------------------------------------------------------
+# Sheet protection - prevents accidental changes to logos and data
+# ---------------------------------------------------------------------------
+# Every attendance sheet is protected with this password. Protection stops
+# anyone from selecting or deleting the embedded logo and from hand-editing or
+# deleting the attendance data; AutoFilter dropdowns and the A4 subsection
+# picker keep working. Change the value here and rebuild to change the
+# worksheet-protection password. This deters accidental changes, not deliberate
+# tampering; Excel worksheet protection is not a security boundary.
+SHEET_PROTECT_PASSWORD = "STL@2026"

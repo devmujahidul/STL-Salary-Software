@@ -18,6 +18,7 @@ from .constants import (
     LIST_SHEET,
     PRINT_TITLE_LAST_ROW,
     SHEET_ORDER,
+    SHEET_PROTECT_PASSWORD,
     SUBSECTION_PREFIX,
     SUMMARY_HEADERS,
     SUMMARY_KEYS,
@@ -177,6 +178,8 @@ def _formats(workbook: xlsxwriter.Workbook) -> dict:
                 "align": "left",
                 "valign": "vcenter",
                 "font_color": "#1F3864",
+                # Keep the subsection dropdown writable on protected sheets.
+                "locked": False,
             }
         ),
         "header": workbook.add_format(
@@ -491,6 +494,37 @@ def _write_sheet(
         # 15.1pt lets 43 attendance rows fit on an A4 landscape page after
         # Excel's fit-to-width scaling, avoiding a near-empty final page.
         ws.set_row(row, 15.1)
+
+    # Protect the sheet so normal Excel editing cannot alter or delete the
+    # embedded logo ("locked objects") or attendance data. The A4 subsection
+    # picker stays editable (its format is unlocked) and the
+    # AutoFilter dropdowns stay usable ("autofilter" allowed). The VBA side
+    # re-applies the same protection at open with UserInterfaceOnly so the
+    # macros keep full access - see vba.py / ProtectAttendanceSheets.
+    ws.protect(
+        SHEET_PROTECT_PASSWORD,
+        {
+            # NOTE on xlsxwriter's inverted semantics for these two keys:
+            # "objects"/"scenarios" mean "editing is ALLOWED", so they must be
+            # False to write objects="1" in the XML (logo cannot be edited
+            # or deleted). All other keys mean "allowed" and must be True.
+            "objects": False,  # lock objects -> the logo can't be deleted
+            "scenarios": False,
+            "format_cells": False,     # cell contents/formats stay locked
+            "format_columns": True,    # drag column edges to resize + hide
+            "format_rows": True,       # drag row edges to resize + hide
+            "insert_columns": False,
+            "insert_rows": False,
+            "insert_hyperlinks": False,
+            "delete_columns": False,
+            "delete_rows": False,
+            "select_locked_cells": True,  # view/copy stays possible
+            "select_unlocked_cells": True,
+            "sort": False,
+            "autofilter": True,  # dropdown filtering keeps working
+            "pivot_tables": False,
+        },
+    )
 
     workbook.define_name(
         f"{sheet_name}_SubSectionCell",

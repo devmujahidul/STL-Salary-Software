@@ -2,13 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .constants import ALL_LABEL, SUBSECTION_PREFIX
+from .constants import ALL_LABEL, SHEET_PROTECT_PASSWORD, SUBSECTION_PREFIX
 
 VBA_THISWORKBOOK = f"""
 Option Explicit
 
 Private Sub Workbook_Open()
     On Error Resume Next
+    ProtectAttendanceSheets
     ApplyFooterSignatures
     ' Ctrl+Shift+T opens the duty-transfer form (Alt+F8 also works).
     Application.OnKey "^+t", "ShowDutyTransferForm"
@@ -34,10 +35,36 @@ Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
 SafeExit:
     Application.EnableEvents = True
 End Sub
+
+' Worksheet protection is persisted in the file, but Excel resets
+' UserInterfaceOnly when it closes. Re-apply it at each open so normal users
+' cannot select/delete drawing objects while the workbook macros can still
+' update attendance values and filtering controls.
+Private Sub ProtectAttendanceSheets()
+    Dim ws As Worksheet
+    On Error Resume Next
+    For Each ws In ThisWorkbook.Worksheets
+        If CStr(ws.Range("A5").Value) = "SL" Then
+            ws.Unprotect Password:="{SHEET_PROTECT_PASSWORD}"
+            ws.Protect Password:="{SHEET_PROTECT_PASSWORD}", _
+                DrawingObjects:=True, Contents:=True, Scenarios:=True, _
+                UserInterfaceOnly:=True, AllowFiltering:=True, _
+                AllowFormattingColumns:=True, AllowFormattingRows:=True
+        End If
+    Next ws
+    ' Structure protection stops deleting / moving / renaming whole sheets,
+    ' which would take the embedded logo with them. The transfer log lifts it
+    ' for the moment it needs to add its hidden history sheet (HistorySheet).
+    ThisWorkbook.Protect Structure:=True, Password:="{SHEET_PROTECT_PASSWORD}"
+End Sub
 """
 
 VBA_MODULE = f"""
 Option Explicit
+
+' Password for the sheet protection applied at open. Public so every module
+' (and ThisWorkbook) can use it; injected from constants.py at build time.
+Public Const SHEET_PWD As String = "{SHEET_PROTECT_PASSWORD}"
 
 ' Module-level state for the Designation print-hide feature. VBA only accepts
 ' module-level declarations here, at the top of the module - declaring this
@@ -457,9 +484,19 @@ Private Function HistorySheet() As Worksheet
             Exit Function
         End If
     Next sh
+    ' Workbook structure protection must be lifted for the moment it takes to
+    ' add the hidden log sheet, then put straight back. The password constant
+    ' is declared in the FilterHelpers module (plain string concatenation here
+    ' - this Python block is not an f-string).
+    On Error Resume Next
+    ThisWorkbook.Unprotect Password:=SHEET_PWD
+    On Error GoTo 0
     Set HistorySheet = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
     HistorySheet.Name = HISTORY_SHEET_NAME
     HistorySheet.Visible = xlSheetVeryHidden
+    On Error Resume Next
+    ThisWorkbook.Protect Structure:=True, Password:=SHEET_PWD
+    On Error GoTo 0
 End Function
 
 Private Function IsAttendanceSheet(ByVal ws As Worksheet) As Boolean
