@@ -16,7 +16,7 @@ from .constants import (
 )
 
 MONTH_OF_RE = re.compile(r"Month of\s*[-:]\s*([A-Za-z]+)\s*[-/]\s*(\d{4})", re.I)
-DATE_HEADER_RE = re.compile(r"^(\d{1,2})(?:\s+([A-Za-z]{3}))?$")
+DATE_HEADER_RE = re.compile(r"^(\d{1,2})(?:\s+([A-Za-z]{3,9}))?$")
 ID_RE = re.compile(r"^[A-Za-z]{1,4}-\d+")
 
 
@@ -41,6 +41,27 @@ class AttendanceData:
     end_date: date
     date_headers: list[tuple[int, str]]  # (day_number, weekday)
     workers: list[Worker] = field(default_factory=list)
+
+
+@dataclass
+class _TableLayout:
+    """Column positions derived from a section table's header row.
+
+    Two raw layouts are supported:
+
+    * Oracle BI matrix export (current, ``matrix_jobcardxl.xls``): identity
+      columns are ``SL | Name | Id No | Designation | Sub Section``, followed
+      by one column per date, then the ``P A OT EOT TOT CL SL EL H`` summary
+      block and a trailing Signature cell. The sub section name is a normal
+      column, so these tables have no ``Sub Section:`` label rows.
+    * Legacy ZKBio export: ``SL | Name | Id No | Designation``, dates, then
+      the summary block; the sub section only appears on ``Sub Section:``
+      label rows above each block (``subsection_col`` is -1).
+    """
+
+    date_cols: list[int]
+    summary_start: int
+    subsection_col: int  # -1 when the table has no Sub Section column
 
 
 def id_prefix(emp_id: str) -> str:
@@ -127,7 +148,7 @@ def period_from_month_line(line: str) -> tuple[date, date]:
     year = int(year_s)
     end = date(year, month_num, 25)
     if month_num == 1:
-        start = date(year - 1, 12, 26)
+        start = date(year - 1, month_num + 11, 26)
     else:
         start = date(year, month_num - 1, 26)
     return start, end
@@ -187,6 +208,7 @@ def _parse_company_table(table) -> dict[str, str]:
 def _parse_section_table(table) -> tuple[list[Worker], list[tuple[int, str]]]:
     rows = table.find_all("tr")
     subsection = ""
+    layout: _TableLayout | None = None
     date_headers: list[tuple[int, str]] = []
     workers: list[Worker] = []
     i = 0
@@ -197,28 +219,32 @@ def _parse_section_table(table) -> tuple[list[Worker], list[tuple[int, str]]]:
             continue
         first = cells[0]
         if first.startswith("Sub Section"):
+            # Legacy layout: a label row above the block.
             subsection = first.split(":", 1)[-1].strip()
             i += 1
             continue
-        if first == "SL":
-            date_headers = _extract_date_headers(cells)
+        if layout is None and first == "SL":
+            # Header row: derive every column position from it.
+            date_headers, layout = _parse_header_row(cells)
             i += 1
             continue
-        if _is_worker_row(cells):
+        if layout is not None and _is_worker_row(cells):
             # The rows immediately after a worker row are the per-day value
             # breakdown: daily OT hours (sum == monthly OT) followed by the
-            # daily totals row (sum == monthly EOT).
+            # daily EOT row (sum == monthly EOT). Both align 1:1 with the
+            # date columns.
             daily_ot_cells, daily_eot_cells = _collect_daily_rows(
                 rows, i + 1, len(date_headers)
             )
-            worker = _worker_from_row(
-                cells,
-                subsection,
-                daily_ot_cells,
-                len(date_headers),
-                daily_eot_cells,
+            workers.append(
+                _worker_from_row(
+                    cells,
+                    subsection,
+                    layout,
+                    daily_ot_cells,
+                    daily_eot_cells,
+                )
             )
-            workers.append(worker)
             i += 1
             if daily_ot_cells is not None:
                 i += 1  # skip the consumed OT row
@@ -227,6 +253,34 @@ def _parse_section_table(table) -> tuple[list[Worker], list[tuple[int, str]]]:
             continue
         i += 1
     return workers, date_headers
+
+
+def _parse_header_row(cells: list[str]) -> tuple[list[tuple[int, str]], _TableLayout]:
+    """Read a section header row (``SL | Name | ... | 26 Sat | ... | P | ...``).
+
+    Date columns are every cell that looks like ``<day> [weekday]``; the
+    summary block starts right after the last date column.
+    """
+    date_headers: list[tuple[int, str]] = []
+    date_cols: list[int] = []
+    subsection_col = -1
+    for idx, cell in enumerate(cells):
+        text = cell.strip()
+        if text.lower() == "sub section":
+            subsection_col = idx
+            continue
+        match = DATE_HEADER_RE.match(text)
+        if match:
+            weekday = (match.group(2) or "").title()
+            date_headers.append((int(match.group(1)), weekday))
+            date_cols.append(idx)
+    if not date_cols:
+        raise ValueError("Section header row has no date columns")
+    return date_headers, _TableLayout(
+        date_cols=date_cols,
+        summary_start=date_cols[-1] + 1,
+        subsection_col=subsection_col,
+    )
 
 
 def _row_cells(row) -> list[str]:
@@ -241,18 +295,6 @@ def _is_worker_row(cells: list[str]) -> bool:
     return bool(ID_RE.match(cells[2].replace(" ", "")))
 
 
-def _extract_date_headers(header_cells: list[str]) -> list[tuple[int, str]]:
-    dates: list[tuple[int, str]] = []
-    for cell in header_cells:
-        match = DATE_HEADER_RE.match(cell.strip())
-        if not match:
-            continue
-        day = int(match.group(1))
-        weekday = (match.group(2) or "").title()
-        dates.append((day, weekday))
-    return dates
-
-
 def _collect_daily_rows(
     rows,
     start: int,
@@ -262,7 +304,7 @@ def _collect_daily_rows(
 
     The raw jobcard has two numeric rows under each worker row: the first is
     the daily OT hours (its sum equals the monthly OT) and the second is the
-    daily totals row (its sum equals the monthly EOT). Return them as a pair
+    daily EOT row (its sum equals the monthly EOT). Return them as a pair
     (ot_cells, eot_cells); whichever rows are missing give None.
     """
     if not date_count:
@@ -301,28 +343,31 @@ def _is_all_numeric(cells: list[str]) -> bool:
 def _worker_from_row(
     cells: list[str],
     subsection: str,
+    layout: _TableLayout,
     daily_ot_cells: list[str] | None = None,
-    date_count: int | None = None,
     daily_eot_cells: list[str] | None = None,
 ) -> Worker:
     emp_id = cells[2].replace(" ", "")
     name = cells[1].strip()
     designation = cells[3].strip() if len(cells) > 3 else ""
-    attendance: list[str] = []
-    # date values sit between designation and summary columns P,A,...
-    summary_start = _find_summary_start(cells)
-    raw_days = cells[4:summary_start]
-    attendance = raw_days
 
-    # Per-day value breakdown rows (31 numeric cells each under the worker
-    # row): daily OT hours (sum == monthly OT total) and daily totals
-    # (sum == monthly EOT total).
-    target = date_count if date_count is not None else len(attendance)
+    # Oracle BI layout: the sub section is a normal column and wins over the
+    # block label (which does not exist in that format anyway).
+    if layout.subsection_col >= 0 and layout.subsection_col < len(cells):
+        row_subsection = cells[layout.subsection_col].strip()
+        if row_subsection:
+            subsection = row_subsection
 
-    def _daily_from(cells: list[str] | None) -> list[float]:
+    attendance = [cells[i] if i < len(cells) else "" for i in layout.date_cols]
+
+    # Per-day value breakdown rows (one cell per date column): daily OT hours
+    # (sum == monthly OT total) and daily EOT (sum == monthly EOT total).
+    target = len(layout.date_cols)
+
+    def _daily_from(row_cells: list[str] | None) -> list[float]:
         values: list[float] = []
-        if cells:
-            for x in cells:
+        if row_cells:
+            for x in row_cells:
                 try:
                     values.append(float(x))
                 except ValueError:
@@ -336,7 +381,7 @@ def _worker_from_row(
     daily_ot = _daily_from(daily_ot_cells)
     daily_eot = _daily_from(daily_eot_cells)
 
-    summary_vals = cells[summary_start : summary_start + 9]
+    summary_vals = cells[layout.summary_start : layout.summary_start + 9]
     keys = ["P", "A", "OT", "EOT", "TOT", "CL", "SL", "EL", "H"]
     summary: dict[str, float | int | str] = {}
     for key, val in zip(keys, summary_vals):
@@ -351,14 +396,6 @@ def _worker_from_row(
         daily_ot=daily_ot,
         daily_eot=daily_eot,
     )
-
-
-def _find_summary_start(cells: list[str]) -> int:
-    # Last 9 value columns before any trailing empties are P,A,OT,EOT,TOT,CL,SL,EL,H
-    # Worker rows in raw files are 44 cells: 4 identity + N dates + 9 summary
-    if len(cells) >= 13:
-        return len(cells) - 9
-    return 4
 
 
 def _as_number(val: str) -> float | int | str:

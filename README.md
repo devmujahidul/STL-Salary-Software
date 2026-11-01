@@ -93,28 +93,40 @@ python convert_attendance.py --raw-dir /path/to/my_raw_files/
 
 ## Input Files
 
-Place your raw Matrix jobcard HTML export files in the `raw_files/` directory. The program supports:
-- `.xls`, `.xlsx`, `.html`, `.htm` files
+Place your raw Matrix jobcard export files in the `raw_files/` directory. The program supports:
+- `.xls`, `.xlsx`, `.html`, `.htm` files (`.xls` files may be HTML exports with an Excel extension)
 - Files must contain jobcard tables with employee data, dates, and attendance codes
 
-Expected raw file structure:
-- Company/address/metadata at the top
-- "Sub Section:" labels
-- "SL" row indicating date headers
-- Worker rows with attendance codes (P, A, W, etc.)
-- Daily OT hours and totals rows
+Two raw layouts are understood automatically (column positions are read from
+each table's header row):
+
+1. **Oracle BI matrix export (current, e.g. `matrix_jobcardxl.xls`)**
+   - First table: company, address, "Month of - <Month>-<yyyy>"
+   - One table per sub section with the header
+     `SL | Name | Id No | Designation | Sub Section | <day> <weekday> ... | P A OT EOT TOT CL SL EL H | Signature`
+   - Under each worker row: two numeric rows (daily OT, then daily EOT) that
+     align 1:1 with the date columns
+2. **Legacy ZKBio export** - identity columns `SL | Name | Id No | Designation`
+   and "Sub Section:" label rows above each block
+
+Worker rows with attendance codes (P, A, W, etc.), the daily OT hours row and
+the daily EOT row are read the same way in both layouts.
 
 ## Output Files
 
 ### With VBA (default):
-- `output/Salary_Attendance_August_2026.xlsm` - Macro-enabled workbook
+- `output/Salary_Attendance_<Month>_<Year>.xlsm` - Macro-enabled workbook
+  (month taken from the raw file, e.g. `Salary_Attendance_September_2026.xlsm`)
   - All attendance data and formulas
   - VBA macros included:
     - **Sub-section filtering**: Dropdown in A4 to filter by subsection
     - **Duty transfer**: Move worker duties between dates
+    - **OT/EOT deduction**: Zero out or reduce OT/EOT hours on a date
     - **Print-time hiding**: Designation column hides on print
     - **Footer signatures**: "Prepared by", "Checked by", "Approved by"
-  - User form for duty transfer (Alt+F8 or button)
+  - User form for duty transfer (Alt+F8 or Ctrl+Shift+T)
+  - User form for OT/EOT deduction (Alt+F8 or Ctrl+Shift+D)
+  - User form for setting leaves (Alt+F8 or Ctrl+Shift+L)
 
 ### Without VBA (`--skip-macros`):
 - `output/Salary_Attendance_August_2026.xlsx` - Regular Excel workbook
@@ -142,6 +154,37 @@ The form lets you:
 - Pick a target date (must show A for the worker)
 - Move qualifying workers' duties
 - Undo the last batch transfer
+
+### OT / EOT Deduction (**.xlsm files only**)
+Access via **Alt+F8** → `ShowDutyDeductForm`, or **Ctrl+Shift+D**.
+
+The form lets you:
+- Choose a subsection (or "All") and a target date
+- Pick one of two modes:
+  - **Deduct hours** - removes N hours from every matching worker on that date.
+    EOT is reduced **first** (EOT hours come after the 2 OT hours); only when
+    EOT runs out does it touch OT. OT never goes below 0.
+  - **Set OT and EOT to zero** - clears both cells for every matching worker
+- Add an optional comparison condition to limit who is affected, e.g.
+  `Total (OT+EOT) > 0`, `OT >= 2` or `EOT < 5` (untick to affect everyone)
+- Undo the last deduction batch (the same undo stack as duty transfer)
+
+### Set Leave (**.xlsm files only**)
+Access via **Alt+F8** → `ShowLeafSetForm`, or **Ctrl+Shift+L**.
+
+The form lets you:
+- Choose a subsection (or "All") and a target date
+- Pick the leave code: **CL**, **SL**, **EL** or **H**
+- Choose the scope:
+  - **All workers in the sub section** - everyone on that date gets the code
+  - **Only workers marked A** - absences on that date become the leave
+- Workers already carrying the code are left untouched
+- OT / EOT hours of that date are cleared to 0 (a worker on leave has no
+  working hours)
+- The monthly summary columns (P/A/CL/SL/EL/H, OT/EOT) are live formulas, so
+  they recalculate automatically
+- Undo restores the codes AND the cleared hours (same undo stack as duty
+  transfer and deduction)
 
 ### Printing
 - Designation column (D) is hidden automatically before printing

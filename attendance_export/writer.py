@@ -42,7 +42,7 @@ LABEL_TEXT_COL = 49  # AX, hidden
 SUMMARY_COL_WIDTHS = (2.9, 2.9, 3.1, 4.6, 4.6, 2.9, 2.9, 2.9, 2.9, 8.0)
 
 
-def write_workbook(data: AttendanceData, output_path: str | Path) -> Path:
+def write_workbook(data: AttendanceData, output_path: str | Path, merge_mode: bool = False) -> Path:
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -64,6 +64,7 @@ def write_workbook(data: AttendanceData, output_path: str | Path) -> Path:
             sheet_name,
             data,
             workers,
+            merge_mode,
         )
 
     # Signature options live on the Lists sheet; the printed footer is built
@@ -168,6 +169,8 @@ def _formats(workbook: xlsxwriter.Workbook) -> dict:
                 "align": "center",
                 "valign": "vcenter",
                 "font_color": "#1F1F1F",
+                # Keep the period label editable on protected sheets.
+                "locked": False,
             }
         ),
         "subsection": workbook.add_format(
@@ -358,6 +361,7 @@ def _write_sheet(
     sheet_name,
     data: AttendanceData,
     workers: list[Worker],
+    merge_mode: bool = False,
 ):
     date_count = len(data.date_headers)
     # Date headings are labels, not values. Writing them as text prevents Excel
@@ -497,8 +501,8 @@ def _write_sheet(
 
     # Protect the sheet so normal Excel editing cannot alter or delete the
     # embedded logo ("locked objects") or attendance data. The A4 subsection
-    # picker stays editable (its format is unlocked) and the
-    # AutoFilter dropdowns stay usable ("autofilter" allowed). The VBA side
+    # picker and the period label stay editable (their formats are unlocked)
+    # and the AutoFilter dropdowns stay usable ("autofilter" allowed). The VBA side
     # re-applies the same protection at open with UserInterfaceOnly so the
     # macros keep full access - see vba.py / ProtectAttendanceSheets.
     ws.protect(
@@ -510,11 +514,13 @@ def _write_sheet(
             # or deleted). All other keys mean "allowed" and must be True.
             "objects": False,  # lock objects -> the logo can't be deleted
             "scenarios": False,
-            "format_cells": False,     # cell contents/formats stay locked
+            "format_cells": True,      # ribbon Font/Alignment/Number stay usable
+                                       # (cell CONTENTS stay locked; the logo is
+                                       # guarded by "objects", not this flag)
             "format_columns": True,    # drag column edges to resize + hide
             "format_rows": True,       # drag row edges to resize + hide
-            "insert_columns": False,
-            "insert_rows": False,
+            "insert_columns": True,    # allow column insertion
+            "insert_rows": True,       # allow row insertion
             "insert_hyperlinks": False,
             "delete_columns": False,
             "delete_rows": False,

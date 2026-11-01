@@ -30,6 +30,7 @@ if not defined PYTHON (
     echo         Install Python 3 and make sure "python" is on the PATH,
     echo         then run this file again.
     echo.
+
     pause
     exit /b 1
 )
@@ -52,11 +53,35 @@ if errorlevel 1 (
     )
 )
 
-echo Command : %PYTHON% convert_attendance.py %*
 echo --------------------------------------------------
 echo.
+echo Choose how to build the attendance file:
+echo   [R] Replace the previous file with newly generated data
+echo   [P] Preserve the previous file's data and apply updated VBA/macros
+echo       and workbook logic to it
+echo.
+choice /c RP /n /m "Select R or P: "
+if errorlevel 2 goto :preserve_previous
+if errorlevel 1 goto :replace_previous
 
-%PYTHON% convert_attendance.py %*
+:replace_previous
+echo.
+echo Mode    : Replace previous file
+echo Command : %PYTHON% convert_attendance.py %* --replace-file
+echo --------------------------------------------------
+echo.
+%PYTHON% convert_attendance.py %* --replace-file
+goto :finished
+
+:preserve_previous
+echo.
+echo Mode    : Preserve previous data
+echo Command : %PYTHON% convert_attendance.py %* --merge-mode
+echo --------------------------------------------------
+echo.
+%PYTHON% convert_attendance.py %* --merge-mode
+
+:finished
 set "RC=%ERRORLEVEL%"
 
 echo.

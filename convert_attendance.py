@@ -18,6 +18,10 @@ def main() -> None:
     parser.add_argument("--raw-dir", default=str(root / "raw_files"))
     parser.add_argument("--output", default="")
     parser.add_argument("--skip-macros", action="store_true")
+    parser.add_argument("--merge-mode", action="store_true", 
+                       help="Apply formula, VBA, functions etc without replacing previous file (merging)")
+    parser.add_argument("--replace-file", action="store_true", 
+                       help="Replace older file (fix exist) - this is the default behavior")
     args = parser.parse_args()
 
     print(f"Reading raw files from {args.raw_dir}")
@@ -35,8 +39,29 @@ def main() -> None:
     prefixes = Counter(sheet_for_worker(w) for w in data.workers)
     print(f"Sheet split: {dict(prefixes)}")
 
-    path = write_workbook(data, output)
-    print(f"Wrote {path}")
+    # Determine the mode: merge-mode overrides replace-file when both are specified
+    # Default behavior is replace-file (old behavior)
+    use_merge_mode = args.merge_mode
+    if args.replace_file:
+        use_merge_mode = False
+
+    if use_merge_mode:
+        previous_xlsm = output.with_suffix(".xlsm")
+        # Prefer the plain workbook: it is the reliable source for refreshing
+        # macros into a new .xlsm while keeping the previous cell data intact.
+        if output.exists():
+            path = output
+        elif previous_xlsm.exists():
+            path = previous_xlsm
+        else:
+            parser.error(
+                f"merge mode needs an existing workbook: {output} or {previous_xlsm}"
+            )
+        mode_text = " (MERGE MODE - preserving existing file data)"
+    else:
+        path = write_workbook(data, output, merge_mode=False)
+        mode_text = " (REPLACE MODE - overwriting existing file)"
+    print(f"Wrote {path}{mode_text}")
 
     if not args.skip_macros:
         ok, reason = attach_filter_macros(path)

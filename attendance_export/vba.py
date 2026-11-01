@@ -13,6 +13,10 @@ Private Sub Workbook_Open()
     ApplyFooterSignatures
     ' Ctrl+Shift+T opens the duty-transfer form (Alt+F8 also works).
     Application.OnKey "^+t", "ShowDutyTransferForm"
+    ' Ctrl+Shift+D opens the OT/EOT deduction form.
+    Application.OnKey "^+d", "ShowDutyDeductForm"
+    ' Ctrl+Shift+L opens the set-leave form.
+    Application.OnKey "^+l", "ShowLeafSetForm"
 End Sub
 
 ' Excel prints hidden columns - so before any print (or print preview) we
@@ -49,6 +53,7 @@ Private Sub ProtectAttendanceSheets()
             ws.Protect Password:="{SHEET_PROTECT_PASSWORD}", _
                 DrawingObjects:=True, Contents:=True, Scenarios:=True, _
                 UserInterfaceOnly:=True, AllowFiltering:=True, _
+                AllowFormattingCells:=True, _
                 AllowFormattingColumns:=True, AllowFormattingRows:=True
         End If
     Next ws
@@ -81,6 +86,9 @@ Public Sub ApplySubSectionFilter(ByVal ws As Worksheet)
     Dim i As Long
     Dim formulaText As String
     Dim rng As Range
+    Dim visCount As Long
+
+    On Error GoTo Failed
 
     raw = CStr(ws.Range("A4").Value)
     chosen = raw
@@ -94,9 +102,14 @@ Public Sub ApplySubSectionFilter(ByVal ws As Worksheet)
     filterCol = lastCol
     Set rng = ws.Range(ws.Cells(5, 1), ws.Cells(lastRow, lastCol))
 
+    ' Drop any previous criteria FIRST. Toggling AutoFilterMode off and on
+    ' can silently re-apply the stale criteria, so clear with ShowAllData.
+    On Error Resume Next
+    If ws.FilterMode Then ws.ShowAllData
+    On Error GoTo Failed
+
     If chosen = "" Or chosen = "{ALL_LABEL}" Then
-        If ws.AutoFilterMode Then ws.AutoFilterMode = False
-        rng.AutoFilter
+        ' ShowAllData above already restored every row; the dropdowns stay.
     ElseIf InStr(chosen, "+") > 0 Then
         parts = Split(chosen, "+")
         For i = LBound(parts) To UBound(parts)
@@ -107,17 +120,53 @@ Public Sub ApplySubSectionFilter(ByVal ws As Worksheet)
         rng.AutoFilter Field:=filterCol, Criteria1:=chosen
     End If
 
-    ' Put the live "Sub Section: ..." formula back into A4. The normal
-    ' (non-array) formula recalculates whenever the filter changes.
-    formulaText = LabelFormula(ws)
+    ' A pick that matches nobody would hide every row (and the label would
+    ' then wrongly show "All"). Detect it, tell the user and fall back to
+    ' All so the sheet never ends up blank and stuck.
+    visCount = Application.WorksheetFunction.Subtotal(103, _
+        ws.Range(ws.Cells(6, 1), ws.Cells(lastRow, 1)))
+    If visCount = 0 And chosen <> "" And chosen <> "{ALL_LABEL}" Then
+        On Error Resume Next
+        ws.ShowAllData
+        On Error GoTo Failed
+        ws.Range("A4").Value = "{SUBSECTION_PREFIX}{ALL_LABEL}"
+        If Application.DisplayAlerts Then
+            MsgBox "No worker on sheet '" & ws.Name & "' matches '" & chosen & _
+                   "'. The filter was reset to All." & vbCrLf & vbCrLf & _
+                   "Pick a name from the A4 dropdown list.", _
+                   vbExclamation, "Sub Section Filter"
+        End If
+        Exit Sub
+    End If
+
+    ' Keep a normal dropdown pick as one name. The live formula is only
+    ' needed for the explicit multi-subsection checkbox flow; otherwise it
+    ' would TEXTJOIN every visible subsection and make one pick look like
+    ' several names joined with "+".
     On Error Resume Next
-    If Len(formulaText) > 0 Then
-        ws.Range("A4").Formula = formulaText
-        ws.Range("A4").Calculate
+    If InStr(chosen, "+") > 0 Then
+        formulaText = LabelFormula(ws)
+        If Len(formulaText) > 0 Then
+            ws.Range("A4").Formula = formulaText
+            ws.Range("A4").Calculate
+        Else
+            ws.Range("A4").Value = "{SUBSECTION_PREFIX}" & chosen
+        End If
     Else
         ws.Range("A4").Value = "{SUBSECTION_PREFIX}" & chosen
     End If
     On Error GoTo 0
+    Exit Sub
+
+Failed:
+    ' Never leave the event machinery or the filter in a broken state.
+    On Error Resume Next
+    If ws.FilterMode Then ws.ShowAllData
+    Application.EnableEvents = True
+    If Application.DisplayAlerts Then
+        MsgBox "Sub Section filtering stopped: " & Err.Description, _
+               vbExclamation, "Sub Section Filter"
+    End If
 End Sub
 
 Private Function LabelFormula(ByVal ws As Worksheet) As String
@@ -584,6 +633,20 @@ Public Sub FillDateCombo(ByVal frm As Object)
     Next c
 End Sub
 
+' Same date list as FillDateCombo, but for any single combo control name -
+' the OT/EOT deduction form uses one date picker (cboDate).
+Public Sub FillDateComboOne(ByVal frm As Object, ByVal comboName As String)
+    Dim ws As Worksheet
+    Dim c As Long
+    Dim v As String
+    Set ws = ReferenceAttendanceSheet()
+    For c = 5 To ws.Columns.Count
+        v = CStr(ws.Cells(5, c).Value)
+        If v = "" Then Exit For
+        If IsNumeric(v) Then frm.Controls(comboName).AddItem v
+    Next c
+End Sub
+
 Private Function ReferenceAttendanceSheet() As Worksheet
     Dim sh As Worksheet
     On Error Resume Next
@@ -623,6 +686,281 @@ Private Function ComboIndex(ByVal cbo As Object, ByVal text As String) As Long
             Exit Function
         End If
     Next i
+End Function
+
+' ============== OT / EOT deduction (per sub section) ==============
+' Ctrl+Shift+D opens frmDutyDeduct. Two modes per target date:
+'
+'   * Zero mode: OT and EOT of that day become 0.
+'   * Deduct mode: N hours are removed per worker. EOT is reduced FIRST
+'     (EOT hours come after the 2 OT hours), and only when EOT runs out
+'     does the deduction touch OT. OT never goes below 0.
+'
+' An optional comparison condition (field >/>=/=/<=/</<> value) limits
+' which workers are affected, e.g. Total > 0 or OT >= 2.
+' Every change is logged on the hidden sheet, so the same "undo" that
+' restores transfers also restores the last deduction batch.
+
+Public Sub ShowDutyDeductForm()
+    frmDutyDeduct.Show 0
+End Sub
+
+Public Function ExecuteDutyDeduct( _
+    ByVal sectionName As String, _
+    ByVal targetDay As String, _
+    ByVal zeroMode As Boolean, _
+    ByVal hours As Double, _
+    ByVal useFilter As Boolean, _
+    ByVal filterField As String, _
+    ByVal filterOp As String, _
+    ByVal filterValue As Double) As String
+
+    Dim ws As Worksheet
+    Dim r As Long, lastRow As Long, fCol As Long, dCol As Long
+    Dim sec As String
+    Dim otV As Double, eotV As Double, fieldValue As Double
+    Dim remaining As Double, ded As Double
+    Dim zeroed As Long, deducted As Long, partials As Long
+    Dim skippedNoHours As Long, filteredOut As Long
+    Dim batchRow As Long, savedCells As Long
+
+    targetDay = Trim$(targetDay)
+    If targetDay = "" Then
+        ExecuteDutyDeduct = "Pick the target date first."
+        Exit Function
+    End If
+    If Not zeroMode And hours <= 0 Then
+        ExecuteDutyDeduct = "Enter how many hours to deduct."
+        Exit Function
+    End If
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    On Error GoTo Failed
+
+    batchRow = 0
+    For Each ws In ThisWorkbook.Worksheets
+        If Not IsAttendanceSheet(ws) Then GoTo NextSheet
+        If LastDataRow(ws) < 6 Then GoTo NextSheet
+        fCol = FilterColumn(ws)
+        lastRow = LastDataRow(ws)
+        dCol = FindDateColumn(ws, targetDay)
+        If dCol = 0 Then GoTo NextSheet
+
+        r = 6
+        Do While r <= lastRow
+            sec = Trim$(CStr(ws.Cells(r, fCol).Value))
+            If sectionName <> "All" And StrComp(sec, sectionName, vbTextCompare) <> 0 Then GoTo NextWorker
+
+            otV = Val(ws.Cells(r + 1, dCol).Value)
+            eotV = Val(ws.Cells(r + 2, dCol).Value)
+            If otV <= 0 And eotV <= 0 Then
+                skippedNoHours = skippedNoHours + 1
+                GoTo NextWorker
+            End If
+
+            If useFilter Then
+                Select Case filterField
+                    Case "OT": fieldValue = otV
+                    Case "EOT": fieldValue = eotV
+                    Case Else: fieldValue = otV + eotV   ' Total (OT+EOT)
+                End Select
+                If Not PassesOperator(fieldValue, filterOp, filterValue) Then
+                    filteredOut = filteredOut + 1
+                    GoTo NextWorker
+                End If
+            End If
+
+            If batchRow = 0 Then batchRow = StartHistoryBatch()
+            savedCells = savedCells + SaveCellState(ws, r + 1, dCol)
+            savedCells = savedCells + SaveCellState(ws, r + 2, dCol)
+
+            If zeroMode Then
+                ws.Cells(r + 1, dCol).Value = 0
+                ws.Cells(r + 2, dCol).Value = 0
+                zeroed = zeroed + 1
+            Else
+                ' EOT first (it is the extra beyond the 2 OT hours)...
+                remaining = hours
+                ded = eotV
+                If ded > remaining Then ded = remaining
+                If ded > 0 Then ws.Cells(r + 2, dCol).Value = Round(eotV - ded, 2)
+                remaining = remaining - ded
+                ' ...then OT, which never drops below 0.
+                If remaining > 0.001 Then
+                    ded = otV
+                    If ded > remaining Then ded = remaining
+                    If ded > 0 Then ws.Cells(r + 1, dCol).Value = Round(otV - ded, 2)
+                    remaining = remaining - ded
+                End If
+                If remaining > 0.001 Then
+                    partials = partials + 1     ' worker had fewer hours than asked
+                Else
+                    deducted = deducted + 1
+                End If
+            End If
+NextWorker:
+            r = r + 3
+        Loop
+NextSheet:
+    Next ws
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    If batchRow > 0 And savedCells = 0 Then
+        ' Nothing changed: drop the empty batch marker.
+        On Error Resume Next
+        HistorySheet().Rows(batchRow).Delete
+        On Error GoTo 0
+        batchRow = 0
+    End If
+
+    If zeroMode Then
+        ExecuteDutyDeduct = CStr(zeroed) & " worker(s) set to OT 0 / EOT 0 on day " & targetDay & "."
+    Else
+        ExecuteDutyDeduct = CStr(deducted + partials) & " worker(s) deducted on day " & targetDay & "." & vbCrLf & _
+            CStr(deducted) & " full deduction, " & CStr(partials) & " partial (they had fewer hours)." & vbCrLf & _
+            CStr(filteredOut) & " skipped by the condition, " & CStr(skippedNoHours) & " had no hours."
+    End If
+    Exit Function
+
+Failed:
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    ExecuteDutyDeduct = "Deduction stopped: " & Err.Description
+End Function
+
+' Numeric comparison for the deduction condition line.
+Private Function PassesOperator(ByVal v As Double, ByVal op As String, ByVal ref As Double) As Boolean
+    Select Case op
+        Case ">":  PassesOperator = (v > ref)
+        Case ">=": PassesOperator = (v >= ref)
+        Case "=":  PassesOperator = (v = ref)
+        Case "<=": PassesOperator = (v <= ref)
+        Case "<":  PassesOperator = (v < ref)
+        Case "<>": PassesOperator = (v <> ref)
+        Case Else: PassesOperator = True
+    End Select
+End Function
+
+' ============== Set leave (CL / SL / EL / H) per sub section ==============
+' Ctrl+Shift+L opens frmLeafSet. Puts the chosen leave code into the
+' attendance cell of the target date for every matching worker.
+'
+'   * "All workers" mode: everyone of the sub section is set.
+'   * "Only workers marked A": absences on that date become the leave.
+'
+' Workers already carrying the code are left alone. Because a worker on
+' leave has no working hours, the OT / EOT values of that day are cleared
+' to 0. The monthly summary columns (P/A/CL/SL/EL/H, OT/EOT) are COUNTIF /
+' SUM formulas, so they recalculate by themselves.
+' Changes go to the shared hidden log, so undo restores the code AND the
+' cleared hours.
+
+Public Sub ShowLeafSetForm()
+    frmLeafSet.Show 0
+End Sub
+
+Public Function ExecuteLeafSet( _
+    ByVal sectionName As String, _
+    ByVal targetDay As String, _
+    ByVal leafCode As String, _
+    ByVal absentOnly As Boolean) As String
+
+    Dim ws As Worksheet
+    Dim r As Long, lastRow As Long, fCol As Long, dCol As Long
+    Dim sec As String, code As String
+    Dim otV As Double, eotV As Double
+    Dim setCount As Long, already As Long, skipped As Long, clearedHours As Long
+    Dim batchRow As Long, savedCells As Long
+
+    targetDay = Trim$(targetDay)
+    leafCode = UCase$(Trim$(leafCode))
+    If targetDay = "" Then
+        ExecuteLeafSet = "Pick the target date first."
+        Exit Function
+    End If
+    Select Case leafCode
+        Case "CL", "SL", "EL", "H"
+        Case Else
+            ExecuteLeafSet = "Pick a leave code: CL, SL, EL or H."
+            Exit Function
+    End Select
+
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    On Error GoTo Failed
+
+    batchRow = 0
+    For Each ws In ThisWorkbook.Worksheets
+        If Not IsAttendanceSheet(ws) Then GoTo NextSheet
+        If LastDataRow(ws) < 6 Then GoTo NextSheet
+        fCol = FilterColumn(ws)
+        lastRow = LastDataRow(ws)
+        dCol = FindDateColumn(ws, targetDay)
+        If dCol = 0 Then GoTo NextSheet
+
+        r = 6
+        Do While r <= lastRow
+            sec = Trim$(CStr(ws.Cells(r, fCol).Value))
+            If sectionName <> "All" And StrComp(sec, sectionName, vbTextCompare) <> 0 Then GoTo NextWorker
+
+            code = UCase$(Trim$(CStr(ws.Cells(r, dCol).Value)))
+            If code = leafCode Then
+                already = already + 1
+                GoTo NextWorker
+            End If
+            If absentOnly And code <> "A" Then
+                skipped = skipped + 1
+                GoTo NextWorker
+            End If
+
+            otV = Val(ws.Cells(r + 1, dCol).Value)
+            eotV = Val(ws.Cells(r + 2, dCol).Value)
+
+            If batchRow = 0 Then batchRow = StartHistoryBatch()
+            savedCells = savedCells + SaveCellState(ws, r, dCol)
+            If otV <> 0 Then
+                savedCells = savedCells + SaveCellState(ws, r + 1, dCol)
+                ws.Cells(r + 1, dCol).Value = 0
+                clearedHours = clearedHours + 1
+            End If
+            If eotV <> 0 Then
+                savedCells = savedCells + SaveCellState(ws, r + 2, dCol)
+                ws.Cells(r + 2, dCol).Value = 0
+                clearedHours = clearedHours + 1
+            End If
+            ws.Cells(r, dCol).Value = leafCode
+            setCount = setCount + 1
+NextWorker:
+            r = r + 3
+        Loop
+NextSheet:
+    Next ws
+
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    If batchRow > 0 And savedCells = 0 Then
+        ' Nothing changed: drop the empty batch marker.
+        On Error Resume Next
+        HistorySheet().Rows(batchRow).Delete
+        On Error GoTo 0
+        batchRow = 0
+    End If
+
+    If setCount = 0 And already = 0 And skipped = 0 Then
+        ExecuteLeafSet = "Nothing changed - check the sub section and date."
+    Else
+        ExecuteLeafSet = CStr(setCount) & " worker(s) set to " & leafCode & " on day " & targetDay & "." & vbCrLf & _
+            CStr(clearedHours) & " OT/EOT value(s) cleared to 0." & vbCrLf & _
+            CStr(already) & " already had " & leafCode & ", " & CStr(skipped) & " skipped (not marked A)."
+    End If
+    Exit Function
+
+Failed:
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    ExecuteLeafSet = "Set leave stopped: " & Err.Description
 End Function
 '''
 
@@ -696,6 +1034,200 @@ Private Function ComboText(ByVal cbo As Object) As String
 End Function
 '''
 
+VBA_FORM_DEDUCT = r'''
+Option Explicit
+
+Private Sub UserForm_Initialize()
+    On Error GoTo Fail
+    lblHint.Caption = _
+        "How the deduction works:" & vbCrLf & _
+        "- Deduct: removes hours from the target date, per worker." & vbCrLf & _
+        "  EOT is reduced FIRST; only when EOT runs out does it touch" & vbCrLf & _
+        "  OT (OT holds at most 2 hours and never goes below 0)." & vbCrLf & _
+        "- Set OT and EOT to zero: clears both for every matching worker." & vbCrLf & _
+        "- The condition line limits who is affected, e.g. Total > 0," & vbCrLf & _
+        "  OT >= 2 or EOT < 5. Untick it to affect everyone." & vbCrLf & _
+        "- Monthly totals recalculate automatically." & vbCrLf & _
+        "- Undo restores the LAST deduction or transfer batch."
+    FillSectionCombo Me
+    FillDateComboOne Me, "cboDate"
+    optDeduct.Value = True
+    txtHours.Text = "1"
+    chkFilter.Value = True
+    cboField.AddItem "Total (OT+EOT)"
+    cboField.AddItem "OT"
+    cboField.AddItem "EOT"
+    cboField.ListIndex = 0
+    cboOperator.AddItem ">"
+    cboOperator.AddItem ">="
+    cboOperator.AddItem "="
+    cboOperator.AddItem "<="
+    cboOperator.AddItem "<"
+    cboOperator.AddItem "<>"
+    cboOperator.ListIndex = 0
+    txtValue.Text = "0"
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Could not initialise the deduction form: " & Err.Description, vbExclamation, "Deduct OT/EOT"
+End Sub
+
+Private Sub optDeduct_Click()
+    txtHours.Enabled = True
+End Sub
+
+Private Sub optZero_Click()
+    txtHours.Enabled = False
+End Sub
+
+Private Sub btnGo_Click()
+    On Error GoTo Fail
+    Dim s As String, d As String, res As String, msg As String
+    Dim zero As Boolean, hrs As Double
+    Dim fld As String, op As String, fval As Double
+
+    s = ComboText(cboSection)
+    d = ComboText(cboDate)
+    If d = "" Then
+        MsgBox "Pick the target date first.", vbExclamation, "Deduct OT/EOT"
+        Exit Sub
+    End If
+    zero = optZero.Value
+    If Not zero Then
+        hrs = Val(txtHours.Text)
+        If hrs <= 0 Then
+            MsgBox "Enter how many hours to deduct.", vbExclamation, "Deduct OT/EOT"
+            Exit Sub
+        End If
+    End If
+    If chkFilter.Value Then
+        fld = ComboText(cboField)
+        op = ComboText(cboOperator)
+        fval = Val(txtValue.Text)
+    End If
+
+    If zero Then
+        msg = "Set OT and EOT to 0 on date " & d & "?"
+    Else
+        msg = "Deduct " & txtHours.Text & " hour(s) on date " & d & "?" & vbCrLf & _
+              "EOT is reduced first, then OT."
+    End If
+    msg = msg & vbCrLf & vbCrLf & "Sub section: " & s
+    If chkFilter.Value Then
+        msg = msg & vbCrLf & "Only workers where " & fld & " " & op & " " & txtValue.Text
+    End If
+    If MsgBox(msg, vbYesNo + vbQuestion, "Deduct OT/EOT") <> vbYes Then Exit Sub
+
+    res = ExecuteDutyDeduct(s, d, zero, hrs, CBool(chkFilter.Value), fld, op, fval)
+    MsgBox res, vbInformation, "Deduct OT/EOT"
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Deduction stopped: " & Err.Description, vbExclamation, "Deduct OT/EOT"
+End Sub
+
+Private Sub btnUndo_Click()
+    On Error GoTo Fail
+    MsgBox UndoLastTransfer(), vbInformation, "Deduct OT/EOT"
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Undo failed: " & Err.Description, vbExclamation, "Deduct OT/EOT"
+End Sub
+
+Private Function ComboText(ByVal cbo As Object) As String
+    On Error Resume Next
+    If IsNull(cbo.Value) Then
+        ComboText = ""
+    Else
+        ComboText = Trim$(CStr(cbo.Value))
+    End If
+End Function
+'''
+
+VBA_FORM_LEAF = r'''
+Option Explicit
+
+Private Sub UserForm_Initialize()
+    On Error GoTo Fail
+    lblHint.Caption = _
+        "What this does:" & vbCrLf & _
+        "- Puts the chosen leave code (CL / SL / EL / H) in the" & vbCrLf & _
+        "  attendance cell of the target date." & vbCrLf & _
+        "- All workers: every worker of the sub section is set." & vbCrLf & _
+        "  Only workers marked A: absences on that date become the leave." & vbCrLf & _
+        "- OT / EOT hours of that date are cleared to 0 - a worker" & vbCrLf & _
+        "  on leave has no working hours." & vbCrLf & _
+        "- Monthly totals (P/A/CL/SL/EL/H, OT/EOT) recalculate" & vbCrLf & _
+        "  automatically." & vbCrLf & _
+        "- Undo restores the LAST change (leave, deduction or transfer)."
+    FillSectionCombo Me
+    FillDateComboOne Me, "cboDate"
+    cboLeaf.AddItem "CL"
+    cboLeaf.AddItem "SL"
+    cboLeaf.AddItem "EL"
+    cboLeaf.AddItem "H"
+    cboLeaf.ListIndex = 0
+    optAll.Value = True
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Could not initialise the leave form: " & Err.Description, vbExclamation, "Set Leave"
+End Sub
+
+Private Sub btnGo_Click()
+    On Error GoTo Fail
+    Dim s As String, d As String, res As String, msg As String
+    Dim leaf As String, onlyA As Boolean
+
+    s = ComboText(cboSection)
+    d = ComboText(cboDate)
+    leaf = ComboText(cboLeaf)
+    If d = "" Then
+        MsgBox "Pick the target date first.", vbExclamation, "Set Leave"
+        Exit Sub
+    End If
+    If leaf = "" Then
+        MsgBox "Pick the leave code (CL / SL / EL / H).", vbExclamation, "Set Leave"
+        Exit Sub
+    End If
+    onlyA = optAbsent.Value
+
+    msg = "Set " & leaf & " on date " & d & "?" & vbCrLf & vbCrLf & "Sub section: " & s
+    If onlyA Then
+        msg = msg & vbCrLf & "Only workers marked A on that date."
+    Else
+        msg = msg & vbCrLf & "Every worker of the sub section; OT/EOT of the day is cleared to 0."
+    End If
+    If MsgBox(msg, vbYesNo + vbQuestion, "Set Leave") <> vbYes Then Exit Sub
+
+    res = ExecuteLeafSet(s, d, leaf, onlyA)
+    MsgBox res, vbInformation, "Set Leave"
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Set leave stopped: " & Err.Description, vbExclamation, "Set Leave"
+End Sub
+
+Private Sub btnUndo_Click()
+    On Error GoTo Fail
+    MsgBox UndoLastTransfer(), vbInformation, "Set Leave"
+    btnUndo.Enabled = HasUndo()
+    Exit Sub
+Fail:
+    MsgBox "Undo failed: " & Err.Description, vbExclamation, "Set Leave"
+End Sub
+
+Private Function ComboText(ByVal cbo As Object) As String
+    On Error Resume Next
+    If IsNull(cbo.Value) Then
+        ComboText = ""
+    Else
+        ComboText = Trim$(CStr(cbo.Value))
+    End If
+End Function
+'''
+
 
 def _add_ctl(designer, kind: str, name: str, **attrs):
     ctl = designer.Controls.Add(kind, name)
@@ -739,6 +1271,80 @@ def _build_transfer_form(project) -> bool:
     _add_ctl(des, "Forms.CommandButton.1", "btnUndo", Caption="Undo last transfer", Left=175, Top=262, Width=167, Height=26)
 
     form.CodeModule.AddFromString(VBA_FORM_CODE)
+    return True
+
+
+def _build_deduct_form(project) -> bool:
+    """Design the modeless UserForm (frmDutyDeduct) for OT/EOT deduction."""
+    form_name = "frmDutyDeduct"
+    for comp in list(project.VBComponents):
+        if comp.Name == form_name:
+            project.VBComponents.Remove(comp)
+    form = project.VBComponents.Add(3)  # vbext_ct_MSForm
+    form.Name = form_name
+    for key, value in (
+        ("Caption", "Deduct OT / EOT"),
+        ("Width", 394),
+        ("Height", 368),
+    ):
+        try:
+            form.Properties(key).Value = value
+        except Exception:
+            pass
+
+    des = form.Designer
+    _add_ctl(des, "Forms.Label.1", "lblSection", Caption="Sub section (All = whole file)", Left=12, Top=12, Width=280, Height=14)
+    _add_ctl(des, "Forms.ComboBox.1", "cboSection", Left=12, Top=28, Width=220, Height=18)
+    _add_ctl(des, "Forms.Label.1", "lblDate", Caption="Target date", Left=12, Top=52, Width=280, Height=14)
+    _add_ctl(des, "Forms.ComboBox.1", "cboDate", Left=12, Top=68, Width=220, Height=18)
+    _add_ctl(des, "Forms.OptionButton.1", "optDeduct", Caption="Deduct hours", Left=12, Top=92, Width=140, Height=16, Value=True)
+    _add_ctl(des, "Forms.OptionButton.1", "optZero", Caption="Set OT and EOT to zero", Left=160, Top=92, Width=200, Height=16)
+    _add_ctl(des, "Forms.Label.1", "lblHours", Caption="Hours to deduct (EOT first, then OT)", Left=12, Top=112, Width=300, Height=14)
+    _add_ctl(des, "Forms.TextBox.1", "txtHours", Left=12, Top=128, Width=80, Height=18)
+    _add_ctl(des, "Forms.CheckBox.1", "chkFilter", Caption="Only workers where:", Left=12, Top=152, Width=200, Height=16, Value=True)
+    _add_ctl(des, "Forms.ComboBox.1", "cboField", Left=12, Top=170, Width=110, Height=18)
+    _add_ctl(des, "Forms.ComboBox.1", "cboOperator", Left=128, Top=170, Width=50, Height=18)
+    _add_ctl(des, "Forms.TextBox.1", "txtValue", Left=184, Top=170, Width=60, Height=18)
+    _add_ctl(des, "Forms.Label.1", "lblHint", Caption="How it works", Left=12, Top=192, Width=370, Height=100)
+    _add_ctl(des, "Forms.CommandButton.1", "btnGo", Caption="Apply", Left=12, Top=300, Width=155, Height=26)
+    _add_ctl(des, "Forms.CommandButton.1", "btnUndo", Caption="Undo last deduction", Left=175, Top=300, Width=167, Height=26)
+
+    form.CodeModule.AddFromString(VBA_FORM_DEDUCT)
+    return True
+
+
+def _build_leaf_form(project) -> bool:
+    """Design the modeless UserForm (frmLeafSet) for setting leaves."""
+    form_name = "frmLeafSet"
+    for comp in list(project.VBComponents):
+        if comp.Name == form_name:
+            project.VBComponents.Remove(comp)
+    form = project.VBComponents.Add(3)  # vbext_ct_MSForm
+    form.Name = form_name
+    for key, value in (
+        ("Caption", "Set Leave (CL / SL / EL / H)"),
+        ("Width", 394),
+        ("Height", 358),
+    ):
+        try:
+            form.Properties(key).Value = value
+        except Exception:
+            pass
+
+    des = form.Designer
+    _add_ctl(des, "Forms.Label.1", "lblSection", Caption="Sub section (All = whole file)", Left=12, Top=12, Width=280, Height=14)
+    _add_ctl(des, "Forms.ComboBox.1", "cboSection", Left=12, Top=28, Width=220, Height=18)
+    _add_ctl(des, "Forms.Label.1", "lblDate", Caption="Target date", Left=12, Top=52, Width=280, Height=14)
+    _add_ctl(des, "Forms.ComboBox.1", "cboDate", Left=12, Top=68, Width=220, Height=18)
+    _add_ctl(des, "Forms.Label.1", "lblLeaf", Caption="Leave code", Left=12, Top=92, Width=280, Height=14)
+    _add_ctl(des, "Forms.ComboBox.1", "cboLeaf", Left=12, Top=108, Width=120, Height=18)
+    _add_ctl(des, "Forms.OptionButton.1", "optAll", Caption="All workers in the sub section", Left=12, Top=132, Width=240, Height=16, Value=True)
+    _add_ctl(des, "Forms.OptionButton.1", "optAbsent", Caption="Only workers marked A", Left=12, Top=152, Width=240, Height=16)
+    _add_ctl(des, "Forms.Label.1", "lblHint", Caption="What this does", Left=12, Top=172, Width=370, Height=110)
+    _add_ctl(des, "Forms.CommandButton.1", "btnGo", Caption="Set leave", Left=12, Top=290, Width=155, Height=26)
+    _add_ctl(des, "Forms.CommandButton.1", "btnUndo", Caption="Undo last change", Left=175, Top=290, Width=167, Height=26)
+
+    form.CodeModule.AddFromString(VBA_FORM_LEAF)
     return True
 
 
@@ -795,19 +1401,34 @@ def attach_filter_macros(xlsx_path: str | Path) -> tuple[bool, str]:
         _replace_std_module(project, "FilterHelpers", VBA_MODULE)
         _replace_std_module(project, "DutyTransferHelpers", VBA_TRANSFER_MODULE)
         _build_transfer_form(project)
+        _build_deduct_form(project)
+        _build_leaf_form(project)
 
-        xlsm_path = xlsx_path.with_suffix(".xlsm")
+        # A normal build starts from .xlsx and creates its .xlsm beside it.
+        # Merge mode passes an existing .xlsm, which must be saved in place so
+        # its workbook data and customizations remain untouched.
+        in_place = xlsx_path.suffix.lower() == ".xlsm"
         try:
-            wb.SaveAs(str(xlsm_path), FileFormat=52)
+            if in_place:
+                wb.Save()
+            else:
+                xlsm_path = xlsx_path.with_suffix(".xlsm")
+                wb.SaveAs(str(xlsm_path), FileFormat=52)
         except Exception as exc:
             wb.Close(SaveChanges=False)
             return False, (
-                f"Excel could not save {xlsm_path.name}:\n"
+                f"Excel could not save {xlsx_path.name}:\n"
                 f"        {exc}".strip() + "\n"
                 "        (close the file if it is open in Excel, or check\n"
                 "        write permission on the output folder)"
             )
         wb.Close(SaveChanges=False)
+        if in_place:
+            # Excel can keep the source file locked until its application
+            # instance exits, even after the workbook is closed. The save was
+            # already completed above, so no file replacement is needed.
+            excel.Quit()
+            excel = None
         return True, ""
     except Exception as exc:
         return False, f"Unexpected Excel automation error: {exc}".strip()
